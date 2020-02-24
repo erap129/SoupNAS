@@ -181,7 +181,7 @@ def my_main():
                     module__block_size=10,
                     module__random_input_range=random_input_range,
                     module__random_input_factor=random_input_factor,
-                    max_epochs=1,
+                    max_epochs=50,
                     lr=0.1,
                     iterator_train__shuffle=True,
                     device='cuda',
