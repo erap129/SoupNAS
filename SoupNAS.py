@@ -14,7 +14,7 @@ from torch import nn
 from skorch import NeuralNetClassifier
 from PytorchModules import Conv2dAuto, ResidualBlock
 from graphviz import Digraph
-from datetime import date
+from datetime import datetime
 from sacred import Experiment
 import pandas as pd
 
@@ -85,9 +85,46 @@ def get_soup_layer(layer_type, input_channels, output_channels):
         return layer_type()
 
 
-class SoupNetwork(nn.Module):
+class OptionsSoupNetwork(nn.Module):
+    def __init__(self, layer_stock, soup_size, n_blocks, block_size, layer_options):
+        super(OptionsSoupNetwork, self).__init__()
+        self.layer_stock = layer_stock
+        self.soup_size = soup_size
+        self.n_blocks = n_blocks
+        self.block_size = block_size
+        self.expansion_convs = ModuleList([Conv2dAuto(in_channels=max(1, 32 * i), out_channels=32 * (i + 1), kernel_size=3) for i in range(n_blocks)])
+        self.layer_options = layer_options
+        self.soup = self.make_options_soup()
+        self.linear = nn.Linear(int(x_train.shape[2] / 2 ** n_blocks) * int(x_train.shape[3] / 2 ** n_blocks) * int(32 * (n_blocks)), 10)
+
+    def make_options_soup(self):
+        soup = ModuleList()
+        for block_idx in range(self.n_blocks):
+            block_channels = max(1, 32*block_idx)
+            soup.append(ModuleList())
+            for i in range(self.block_size):
+                soup[-1].append(ModuleList())
+                for opt_idx in range(self.layer_options):
+                    random_layer = random.sample(layer_stock, 1)[0]
+                    soup[-1][-1].append(get_soup_layer(random_layer, block_channels, block_channels))
+        return soup
+
+    def forward(self, X):
+        for block_idx, block in enumerate(self.soup):
+            for options in block:
+                layer = random.choice(options)
+                X = layer(X)
+            X = self.expansion_convs[block_idx](X)
+            X = nn.MaxPool2d(2, stride=2)(X)
+        X = X.view(X.size(0), -1)
+        X = self.linear(X)
+        X = nn.functional.softmax(X)
+        return X
+
+
+class LinearSoupNetwork(nn.Module):
     def __init__(self, layer_stock, soup_size, n_blocks, block_size, random_input_range, random_input_factor):
-        super(SoupNetwork, self).__init__()
+        super(LinearSoupNetwork, self).__init__()
         self.layer_stock = layer_stock
         self.soup_size = soup_size
         self.n_blocks = n_blocks
@@ -97,7 +134,6 @@ class SoupNetwork(nn.Module):
         self.expansion_convs = ModuleList([Conv2dAuto(in_channels=max(1, 32 * i), out_channels=32 * (i + 1), kernel_size=3) for i in range(n_blocks)])
         self.soup = self.make_linear_soup()
         self.plot_soup()
-        # self.shuffle_net()
         self.linear = nn.Linear(int(x_train.shape[2] / 2 ** n_blocks) * int(x_train.shape[3] / 2 ** n_blocks) * int(32 * (n_blocks)), 10)
 
     def plot_soup(self):
@@ -125,23 +161,14 @@ class SoupNetwork(nn.Module):
                 soup[str(block_idx)][f'{i}_{prev_layers}'] = get_soup_layer(random_layer, block_channels, block_channels)
         return soup
 
-    def shuffle_net(self):
-        self.current_layers = ModuleDict()
-        for block_idx in range(self.n_blocks):
-            self.current_layers[str(block_idx)] = ModuleList()
-            for step in range(self.block_size):
-                block_soup = self.soup[str(block_idx)]
-                relevant_layers = [block_soup[k] for k in block_soup.keys() if
-                                   step in ast.literal_eval(k.split('_')[2])]
-                self.current_layers[str(block_idx)].append(random.choice(relevant_layers))
-
     def forward(self, X):
         run_str = 'input->'
         for block_idx in range(self.n_blocks):
             X.tag = 'startblock'
             run_str += f'BLOCK_{block_idx}['
             for step in range(self.block_size):
-                relevant_layers = {k: v for k, v in self.soup[str(block_idx)].items() if X.tag in intlst_to_strlst(ast.literal_eval(k.split('_')[1]))}
+                relevant_layers = {k: v for k, v in self.soup[str(block_idx)].items() if
+                                   X.tag in intlst_to_strlst(ast.literal_eval(k.split('_')[1]))}
                 if len(relevant_layers) > 0:
                     layer_key = random.choice(list(relevant_layers.keys()))
                     layer = self.soup[str(block_idx)][layer_key]
@@ -160,21 +187,13 @@ class SoupNetwork(nn.Module):
         return X
 
 
-@ex.automain
-def my_main():
-    callbacks = []
-    writer = SummaryWriter()
-    callbacks.append(MyTensorBoard(writer, X=fmnist_train.train_data[:, None, :, :].float()[:2]))
-    callbacks.append(ShuffleOrder())
-    callbacks.append(EarlyStopping())
-    today = date.today()
-    today_str = today.strftime("%d-%m-%h-%m")
+def linear_experiment(callbacks, today_str):
     dict_list = []
     for random_input_range in range(1, 2):
         for random_input_factor in range(1, 10):
             for iteration in range(100):
                 skorch_sn = NeuralNetClassifier(
-                    module=SoupNetwork,
+                    module=LinearSoupNetwork,
                     module__layer_stock=layer_stock,
                     module__soup_size=30,
                     module__n_blocks=3,
@@ -196,6 +215,46 @@ def my_main():
                                   'accuracy': accuracy})
                 pd.DataFrame(dict_list).to_csv(f'results/{today_str}.csv')
             ex.add_artifact(f'soup_{random_input_factor}_{random_input_range}.pdf')
+
+
+def options_experiment(callbacks, today_str):
+    dict_list = []
+    for layer_options in range(1, 10):
+            for iteration in range(1):
+                skorch_sn = NeuralNetClassifier(
+                    module=OptionsSoupNetwork,
+                    module__layer_stock=layer_stock,
+                    module__soup_size=30,
+                    module__n_blocks=3,
+                    module__block_size=10,
+                    module__layer_options=layer_options,
+                    max_epochs=1,
+                    lr=0.1,
+                    iterator_train__shuffle=True,
+                    device='cuda',
+                    callbacks=callbacks
+                )
+                skorch_sn.fit(fmnist_train.train_data[:, None, :, :].float(), fmnist_train.train_labels.long())
+                y_pred = skorch_sn.predict(fmnist_test.test_data[:, None, :, :].float())
+                accuracy = metrics.accuracy_score(fmnist_test.test_labels.long(), y_pred)
+                dict_list.append({'layer_options': layer_options,
+                                  'iteration': iteration,
+                                  'accuracy': accuracy})
+                pd.DataFrame(dict_list).to_csv(f'results/{today_str}.csv')
+
+
+@ex.automain
+def my_main():
+    callbacks = []
+    writer = SummaryWriter()
+    callbacks.append(MyTensorBoard(writer, X=fmnist_train.train_data[:, None, :, :].float()[:2]))
+    callbacks.append(ShuffleOrder())
+    callbacks.append(EarlyStopping())
+    today = datetime.now()
+    today_str = today.strftime("%d-%m-%H-%M")
+    dict_list = []
+    # linear_experiment(callbacks, today_str)
+    options_experiment(callbacks, today_str)
     filename = 'SoupNAS_fashion_mnist.csv'
     pd.DataFrame(dict_list).to_csv(filename)
     ex.add_artifact(filename)
