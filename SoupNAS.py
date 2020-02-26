@@ -12,15 +12,17 @@ from torch.utils.tensorboard import SummaryWriter
 from skorch.callbacks import TensorBoard, Callback, EarlyStopping
 from torch import nn
 from skorch import NeuralNetClassifier
-from PytorchModules import Conv2dAuto, ResidualBlock
+from PytorchModules import Conv2dAuto, ResidualBlock, ConcatThenOneByOne
 from graphviz import Digraph
 from datetime import datetime
 from sacred import Experiment
 import pandas as pd
+import sys
 
 
 ex = Experiment()
-ex.observers.append(MongoObserver.create(url=f'mongodb://132.72.81.248/SoupNAS', db_name='SoupNAS'))
+if 'debug' not in sys.argv:
+    ex.observers.append(MongoObserver.create(url=f'mongodb://132.72.81.248/SoupNAS', db_name='SoupNAS'))
 writer = SummaryWriter()
 fmnist_train = datasets.FashionMNIST(root='./data', train=True, download=True, transform=transforms.ToTensor())
 fmnist_test = datasets.FashionMNIST(root='./data', train=False, download=True, transform=transforms.ToTensor())
@@ -123,13 +125,13 @@ class OptionsSoupNetwork(nn.Module):
 
 
 class LinearSoupNetwork(nn.Module):
-    def __init__(self, layer_stock, soup_size, n_blocks, block_size, random_input_range, random_input_factor):
+    def __init__(self, layer_stock, soup_size, n_blocks, block_size, random_input_factor, num_receptors):
         super(LinearSoupNetwork, self).__init__()
         self.layer_stock = layer_stock
         self.soup_size = soup_size
         self.n_blocks = n_blocks
         self.block_size = block_size
-        self.random_input_range = random_input_range
+        self.num_receptors = num_receptors
         self.random_input_factor = random_input_factor
         self.expansion_convs = ModuleList([Conv2dAuto(in_channels=max(1, 32 * i), out_channels=32 * (i + 1), kernel_size=3) for i in range(n_blocks)])
         self.soup = self.make_linear_soup()
@@ -144,7 +146,7 @@ class LinearSoupNetwork(nn.Module):
                 f.node(node_name)
                 for incoming in intlst_to_strlst(ast.literal_eval(key.split('_')[1])):
                     f.edge(f'{block_idx}_{incoming}', node_name)
-        f.render(f'soup_{self.random_input_factor}_{self.random_input_range}', view=False)
+        f.render(f'soup_{self.random_input_factor}', view=False)
 
     def make_linear_soup(self):
         soup = ModuleDict()
@@ -153,27 +155,43 @@ class LinearSoupNetwork(nn.Module):
             soup[str(block_idx)] = ModuleDict()
             for i in range(self.block_size):
                 if i > 0:
-                    # prev_layers = random.sample(list(range(max(0, i-self.random_input_range), i)), min(i, random.randint(1, self.random_input_factor)))
-                    prev_layers = list(range(max(0, i-self.random_input_factor), i))
+                    prev_layers = list(range(max(0, i-self.random_input_factor[block_idx][i]), i))
                 else:
                     prev_layers = ['startblock']
                 random_layer = random.sample(layer_stock, 1)[0]
-                soup[str(block_idx)][f'{i}_{prev_layers}'] = get_soup_layer(random_layer, block_channels, block_channels)
+                layer = get_soup_layer(random_layer, block_channels, block_channels)
+                layer.num_receptors = self.num_receptors[block_idx][i]
+                soup[str(block_idx)][f'{i}_{prev_layers}'] = layer
+                if layer.num_receptors > 1:
+                    soup[str(block_idx)][f'{i}_{prev_layers}_connector'] = \
+                        ConcatThenOneByOne(block_channels, layer.num_receptors)
         return soup
 
     def forward(self, X):
         run_str = 'input->'
         for block_idx in range(self.n_blocks):
+            block_outputs = {}
             X.tag = 'startblock'
             run_str += f'BLOCK_{block_idx}['
             for step in range(self.block_size):
                 relevant_layers = {k: v for k, v in self.soup[str(block_idx)].items() if
-                                   X.tag in intlst_to_strlst(ast.literal_eval(k.split('_')[1]))}
+                                   'connector' not in k and X.tag in intlst_to_strlst(ast.literal_eval(k.split('_')[1]))}
                 if len(relevant_layers) > 0:
                     layer_key = random.choice(list(relevant_layers.keys()))
                     layer = self.soup[str(block_idx)][layer_key]
-                    X = layer(X)
+                    if layer.num_receptors == 1:
+                        X = layer(X)
+                    else:
+                        relevant_inputs = [v for k, v in block_outputs.items() if k != X.tag and k in intlst_to_strlst(ast.literal_eval(layer_key.split('_')[1]))]
+                        if len(relevant_inputs) >= layer.num_receptors - 1:
+                            inputs = [X] + random.sample([v for k, v in block_outputs.items() if k != X.tag and
+                                                          k in intlst_to_strlst(ast.literal_eval(layer_key.split('_')[1]))],
+                                                         layer.num_receptors - 1)
+                            X = self.soup[str(block_idx)][f'{layer_key}_connector'](*inputs)
+                        else:
+                            X = layer(X)
                     X.tag = layer_key.split('_')[0]
+                    block_outputs[X.tag] = X
                     run_str += f'{X.tag}->'
             run_str += ']->'
             save_tag = X.tag
@@ -189,32 +207,59 @@ class LinearSoupNetwork(nn.Module):
 
 def linear_experiment(callbacks, today_str):
     dict_list = []
-    for random_input_range in range(1, 2):
-        for random_input_factor in range(1, 10):
-            for iteration in range(100):
-                skorch_sn = NeuralNetClassifier(
-                    module=LinearSoupNetwork,
-                    module__layer_stock=layer_stock,
-                    module__soup_size=30,
-                    module__n_blocks=3,
-                    module__block_size=10,
-                    module__random_input_range=random_input_range,
-                    module__random_input_factor=random_input_factor,
-                    max_epochs=50,
-                    lr=0.1,
-                    iterator_train__shuffle=True,
-                    device='cuda',
-                    callbacks=callbacks
-                )
-                skorch_sn.fit(fmnist_train.train_data[:, None, :, :].float(), fmnist_train.train_labels.long())
-                y_pred = skorch_sn.predict(fmnist_test.test_data[:, None, :, :].float())
-                accuracy = metrics.accuracy_score(fmnist_test.test_labels.long(), y_pred)
-                dict_list.append({'random_input_range': random_input_range,
-                                  'random_input_factor': random_input_factor,
-                                  'iteration': iteration,
-                                  'accuracy': accuracy})
-                pd.DataFrame(dict_list).to_csv(f'results/{today_str}.csv')
-            ex.add_artifact(f'soup_{random_input_factor}_{random_input_range}.pdf')
+    for random_input_factor in range(1, 10):
+        for iteration in range(100):
+            skorch_sn = NeuralNetClassifier(
+                module=LinearSoupNetwork,
+                module__layer_stock=layer_stock,
+                module__soup_size=30,
+                module__n_blocks=3,
+                module__block_size=10,
+                module__random_input_factor=[[random_input_factor for i in range(10)] for j in range(3)],
+                module__num_receptors=[[1 for i in range(10)] for j in range(3)],
+                max_epochs=50,
+                lr=0.1,
+                iterator_train__shuffle=True,
+                device='cuda',
+                callbacks=callbacks
+            )
+            skorch_sn.fit(fmnist_train.train_data[:, None, :, :].float(), fmnist_train.train_labels.long())
+            y_pred = skorch_sn.predict(fmnist_test.test_data[:, None, :, :].float())
+            accuracy = metrics.accuracy_score(fmnist_test.test_labels.long(), y_pred)
+            dict_list.append({'random_input_factor': random_input_factor,
+                              'iteration': iteration,
+                              'accuracy': accuracy})
+            pd.DataFrame(dict_list).to_csv(f'results/{today_str}.csv')
+        ex.add_artifact(f'soup_{random_input_factor}.pdf')
+
+
+def skip_experiment(callbacks, today_str):
+    dict_list = []
+    for two_receptor_layer in range(1, 10):
+        for iteration in range(100):
+            skorch_sn = NeuralNetClassifier(
+                module=LinearSoupNetwork,
+                module__layer_stock=layer_stock,
+                module__soup_size=30,
+                module__n_blocks=3,
+                module__block_size=10,
+                module__random_input_factor=[[1 for i in range(two_receptor_layer)] + [2] + [1 for i in range(two_receptor_layer+1, 10)] for j in range(3)],
+                module__num_receptors=[[1 for i in range(two_receptor_layer)] + [2] + [1 for i in range(two_receptor_layer+1, 10)] for j in range(3)],
+                max_epochs=50,
+                lr=0.1,
+                iterator_train__shuffle=True,
+                device='cuda',
+                callbacks=callbacks
+            )
+            skorch_sn.fit(fmnist_train.train_data[:, None, :, :].float(), fmnist_train.train_labels.long())
+            y_pred = skorch_sn.predict(fmnist_test.test_data[:, None, :, :].float())
+            accuracy = metrics.accuracy_score(fmnist_test.test_labels.long(), y_pred)
+            dict_list.append({'random_input_factor': random_input_factor,
+                              'iteration': iteration,
+                              'accuracy': accuracy})
+            pd.DataFrame(dict_list).to_csv(f'results/{today_str}.csv')
+        ex.add_artifact(f'soup_{random_input_factor}.pdf')
+
 
 
 def options_experiment(callbacks, today_str):
@@ -243,7 +288,7 @@ def options_experiment(callbacks, today_str):
                 pd.DataFrame(dict_list).to_csv(f'results/{today_str}.csv')
 
 
-@ex.automain
+@ex.main
 def my_main():
     callbacks = []
     writer = SummaryWriter()
@@ -254,9 +299,14 @@ def my_main():
     today_str = today.strftime("%d-%m-%H-%M")
     dict_list = []
     # linear_experiment(callbacks, today_str)
-    options_experiment(callbacks, today_str)
+    # options_experiment(callbacks, today_str)
+    skip_experiment(callbacks, today_str)
     filename = 'SoupNAS_fashion_mnist.csv'
     pd.DataFrame(dict_list).to_csv(filename)
     ex.add_artifact(filename)
+
+
+if __name__ == '__main__':
+    ex.run()
 
 

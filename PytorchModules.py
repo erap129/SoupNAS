@@ -1,5 +1,7 @@
 from functools import partial
 from torch import nn
+from torch.nn import Conv2d
+import torch
 
 
 class Conv2dAuto(nn.Conv2d):
@@ -33,6 +35,15 @@ class ResidualBlock(nn.Module):
         x = x + residual
         out = self.relu(x)
         return out
+
+
+class ConcatThenOneByOne(nn.Module):
+    def __init__(self, channel_num, num_inputs):
+        super(ConcatThenOneByOne, self).__init__()
+        self.onebyone = Conv2d(channel_num * num_inputs, channel_num, kernel_size=1)
+
+    def forward(self, *input):
+        return self.onebyone(torch.cat(input, 1))
 
 
 class SoupConv:
