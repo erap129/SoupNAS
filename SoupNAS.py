@@ -19,6 +19,7 @@ from datetime import datetime
 from sacred import Experiment
 import pandas as pd
 import sys
+import argparse
 
 
 ex = Experiment()
@@ -172,7 +173,7 @@ class LinearSoupNetwork(nn.Module):
         run_str = 'input->'
         for block_idx in range(self.n_blocks):
             block_outputs = {}
-            X.tag = -1
+            X.tag = '-1'
             run_str += f'BLOCK_{block_idx}['
             for step in range(self.block_size):
                 relevant_layers = {k: v for k, v in self.soup[str(block_idx)].items() if
@@ -237,7 +238,7 @@ def linear_experiment(callbacks, today_str):
 def skip_experiment(callbacks, today_str):
     dict_list = []
     for two_receptor_layer in range(1, 10):
-        for iteration in range(1):
+        for iteration in range(100):
             skorch_sn = NeuralNetClassifier(
                 module=LinearSoupNetwork,
                 module__layer_stock=layer_stock,
@@ -246,7 +247,7 @@ def skip_experiment(callbacks, today_str):
                 module__block_size=10,
                 module__random_input_factor=[[1 for i in range(two_receptor_layer)] + [2] + [1 for i in range(two_receptor_layer+1, 10)] for j in range(3)],
                 module__num_receptors=[[1 for i in range(two_receptor_layer)] + [2] + [1 for i in range(two_receptor_layer+1, 10)] for j in range(3)],
-                max_epochs=1,
+                max_epochs=50,
                 lr=0.1,
                 iterator_train__shuffle=True,
                 device='cuda',
@@ -298,13 +299,17 @@ def my_main():
     callbacks.append(MyTensorBoard(writer, X=fmnist_train.train_data[:, None, :, :].float()[:2]))
     callbacks.append(ShuffleOrder())
     callbacks.append(EarlyStopping())
+    exp = sys.argv[1]
     today = datetime.now()
     today_str = today.strftime("%d-%m-%H-%M")
     os.mkdir(f'results/{today_str}')
     dict_list = []
-    # linear_experiment(callbacks, today_str)
-    # options_experiment(callbacks, today_str)
-    skip_experiment(callbacks, today_str)
+    if exp == 'linear':
+        linear_experiment(callbacks, today_str)
+    elif exp == 'options':
+        options_experiment(callbacks, today_str)
+    elif exp == 'skip':
+        skip_experiment(callbacks, today_str)
     filename = 'SoupNAS_fashion_mnist.csv'
     pd.DataFrame(dict_list).to_csv(filename)
     ex.add_artifact(filename)
