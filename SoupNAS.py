@@ -1,4 +1,5 @@
 import ast
+import os
 import random
 
 import torchvision.datasets as datasets
@@ -135,18 +136,18 @@ class LinearSoupNetwork(nn.Module):
         self.random_input_factor = random_input_factor
         self.expansion_convs = ModuleList([Conv2dAuto(in_channels=max(1, 32 * i), out_channels=32 * (i + 1), kernel_size=3) for i in range(n_blocks)])
         self.soup = self.make_linear_soup()
-        self.plot_soup()
         self.linear = nn.Linear(int(x_train.shape[2] / 2 ** n_blocks) * int(x_train.shape[3] / 2 ** n_blocks) * int(32 * (n_blocks)), 10)
 
-    def plot_soup(self):
+    def plot_soup(self, filepath):
         f = Digraph('SoupNAS model')
         for block_idx in range(self.n_blocks):
             for key in self.soup[str(block_idx)]:
-                node_name = f'{block_idx}_{key.split("_")[0]}'
-                f.node(node_name)
-                for incoming in intlst_to_strlst(ast.literal_eval(key.split('_')[1])):
-                    f.edge(f'{block_idx}_{incoming}', node_name)
-        f.render(f'soup_{self.random_input_factor}', view=False)
+                if 'connector' not in key:
+                    node_name = f'{block_idx}_{key.split("_")[0]}'
+                    f.node(node_name)
+                    for incoming in intlst_to_strlst(ast.literal_eval(key.split('_')[1])):
+                        f.edge(f'{block_idx}_{incoming}', node_name)
+        f.render(filepath, view=False)
 
     def make_linear_soup(self):
         soup = ModuleDict()
@@ -155,9 +156,9 @@ class LinearSoupNetwork(nn.Module):
             soup[str(block_idx)] = ModuleDict()
             for i in range(self.block_size):
                 if i > 0:
-                    prev_layers = list(range(max(0, i-self.random_input_factor[block_idx][i]), i))
+                    prev_layers = list(range(max(-1, i-self.random_input_factor[block_idx][i]), i))
                 else:
-                    prev_layers = ['startblock']
+                    prev_layers = [-1]
                 random_layer = random.sample(layer_stock, 1)[0]
                 layer = get_soup_layer(random_layer, block_channels, block_channels)
                 layer.num_receptors = self.num_receptors[block_idx][i]
@@ -171,7 +172,7 @@ class LinearSoupNetwork(nn.Module):
         run_str = 'input->'
         for block_idx in range(self.n_blocks):
             block_outputs = {}
-            X.tag = 'startblock'
+            X.tag = -1
             run_str += f'BLOCK_{block_idx}['
             for step in range(self.block_size):
                 relevant_layers = {k: v for k, v in self.soup[str(block_idx)].items() if
@@ -236,7 +237,7 @@ def linear_experiment(callbacks, today_str):
 def skip_experiment(callbacks, today_str):
     dict_list = []
     for two_receptor_layer in range(1, 10):
-        for iteration in range(100):
+        for iteration in range(1):
             skorch_sn = NeuralNetClassifier(
                 module=LinearSoupNetwork,
                 module__layer_stock=layer_stock,
@@ -245,7 +246,7 @@ def skip_experiment(callbacks, today_str):
                 module__block_size=10,
                 module__random_input_factor=[[1 for i in range(two_receptor_layer)] + [2] + [1 for i in range(two_receptor_layer+1, 10)] for j in range(3)],
                 module__num_receptors=[[1 for i in range(two_receptor_layer)] + [2] + [1 for i in range(two_receptor_layer+1, 10)] for j in range(3)],
-                max_epochs=50,
+                max_epochs=1,
                 lr=0.1,
                 iterator_train__shuffle=True,
                 device='cuda',
@@ -254,11 +255,13 @@ def skip_experiment(callbacks, today_str):
             skorch_sn.fit(fmnist_train.train_data[:, None, :, :].float(), fmnist_train.train_labels.long())
             y_pred = skorch_sn.predict(fmnist_test.test_data[:, None, :, :].float())
             accuracy = metrics.accuracy_score(fmnist_test.test_labels.long(), y_pred)
-            dict_list.append({'random_input_factor': random_input_factor,
+            dict_list.append({'two_receptor_layer': two_receptor_layer,
                               'iteration': iteration,
                               'accuracy': accuracy})
-            pd.DataFrame(dict_list).to_csv(f'results/{today_str}.csv')
-        ex.add_artifact(f'soup_{random_input_factor}.pdf')
+            pd.DataFrame(dict_list).to_csv(f'results/{today_str}/skip_experiment.csv')
+        plot_filename = f'results/{today_str}/soup_{two_receptor_layer}'
+        skorch_sn.module_.plot_soup(plot_filename)
+        ex.add_artifact(plot_filename)
 
 
 
@@ -297,6 +300,7 @@ def my_main():
     callbacks.append(EarlyStopping())
     today = datetime.now()
     today_str = today.strftime("%d-%m-%H-%M")
+    os.mkdir(f'results/{today_str}')
     dict_list = []
     # linear_experiment(callbacks, today_str)
     # options_experiment(callbacks, today_str)
