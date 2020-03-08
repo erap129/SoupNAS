@@ -261,7 +261,10 @@ def skip_experiment(callbacks, today_str):
                               'accuracy': accuracy})
             pd.DataFrame(dict_list).to_csv(f'results/{today_str}/skip_experiment.csv')
         plot_filename = f'results/{today_str}/soup_{two_receptor_layer}'
-        skorch_sn.module_.plot_soup(plot_filename)
+        try:
+            skorch_sn.module_.plot_soup(plot_filename)
+        except Exception as e:
+            print('pydot doesnt exist on this system, not plotting')
         ex.add_artifact(plot_filename)
 
 
