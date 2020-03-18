@@ -268,6 +268,35 @@ def skip_experiment(callbacks, today_str):
         ex.add_artifact(plot_filename)
 
 
+def skip_linear_experiment(callbacks, today_str):
+    dict_list = []
+    for random_input_factor in range(1, 10):
+        for two_receptor_layer in range(1, 10):
+            for iteration in range(100):
+                skorch_sn = NeuralNetClassifier(
+                    module=LinearSoupNetwork,
+                    module__layer_stock=layer_stock,
+                    module__soup_size=30,
+                    module__n_blocks=3,
+                    module__block_size=10,
+                    module__random_input_factor=[[random_input_factor for i in range(two_receptor_layer)] + [max(2, random_input_factor)] + [random_input_factor for i in range(two_receptor_layer+1, 10)] for j in range(3)],
+                    module__num_receptors=[[1 for i in range(two_receptor_layer)] + [2] + [1 for i in range(two_receptor_layer+1, 10)] for j in range(3)],
+                    max_epochs=50,
+                    lr=0.1,
+                    iterator_train__shuffle=True,
+                    device='cuda',
+                    callbacks=callbacks
+                )
+                skorch_sn.fit(fmnist_train.train_data[:, None, :, :].float(), fmnist_train.train_labels.long())
+                y_pred = skorch_sn.predict(fmnist_test.test_data[:, None, :, :].float())
+                accuracy = metrics.accuracy_score(fmnist_test.test_labels.long(), y_pred)
+                dict_list.append({'random_input_factor': random_input_factor,
+                                    'two_receptor_layer': two_receptor_layer,
+                                  'iteration': iteration,
+                                  'accuracy': accuracy})
+                pd.DataFrame(dict_list).to_csv(f'results/{today_str}/skip_linear_experiment.csv')
+
+
 
 def options_experiment(callbacks, today_str):
     dict_list = []
