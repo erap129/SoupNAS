@@ -342,6 +342,8 @@ def my_main():
         options_experiment(callbacks, today_str)
     elif exp == 'skip':
         skip_experiment(callbacks, today_str)
+    elif exp == 'skip_linear':
+        skip_linear_experiment(callbacks, today_str)
     filename = 'SoupNAS_fashion_mnist.csv'
     pd.DataFrame(dict_list).to_csv(filename)
     ex.add_artifact(filename)
