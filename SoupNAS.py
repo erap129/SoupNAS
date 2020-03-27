@@ -221,7 +221,7 @@ class LinearSoupNetwork(nn.Module):
         for block_idx in range(self.n_blocks):
             X.tag = '-1'
             block_outputs = [{X.tag: X} for i in range(self.paths)]
-            for step in range(self.block_size):
+            for step in range(self.block_size * self.paths):
                 relevant_layers = {}
                 for i in range(len(block_outputs)):
                     relevant_layers[i] = {k: v for k, v in self.soup[str(block_idx)].items() if
@@ -361,19 +361,19 @@ def paths_experiment(callbacks, today_str):
                 module__random_input_factor=[[1 for i in range(10)] for j in range(3)],
                 module__num_receptors=[[1 for i in range(10)] for j in range(3)],
                 module__paths=paths,
-                max_epochs=50,
+                max_epochs=1,
                 lr=0.1,
                 iterator_train__shuffle=True,
                 device='cuda',
                 callbacks=callbacks
             )
-        skorch_sn.fit(fmnist_train.train_data[:, None, :, :].float(), fmnist_train.train_labels.long())
-        y_pred = skorch_sn.predict(fmnist_test.test_data[:, None, :, :].float())
-        accuracy = metrics.accuracy_score(fmnist_test.test_labels.long(), y_pred)
-        dict_list.append({'paths': paths,
-                          'iteration': iteration,
-                          'accuracy': accuracy})
-        pd.DataFrame(dict_list).to_csv(f'results/{today_str}/paths_experiment.csv')
+            skorch_sn.fit(fmnist_train.train_data[:, None, :, :].float(), fmnist_train.train_labels.long())
+            y_pred = skorch_sn.predict(fmnist_test.test_data[:, None, :, :].float())
+            accuracy = metrics.accuracy_score(fmnist_test.test_labels.long(), y_pred)
+            dict_list.append({'paths': paths,
+                              'iteration': iteration,
+                              'accuracy': accuracy})
+            pd.DataFrame(dict_list).to_csv(f'results/{today_str}/paths_experiment.csv')
 
 
 def options_experiment(callbacks, today_str):
